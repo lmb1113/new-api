@@ -265,7 +265,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		err, usage = common_handler.RerankHandler(c, info, resp)
 	default:
 		if info.IsStream {
-			err, usage = OaiStreamHandler(c, resp, info)
+			err, usage = OaiStreamHandlerV2(c, resp, info)
 		} else {
 			err, usage = OpenaiHandler(c, resp, info)
 		}

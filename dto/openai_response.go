@@ -20,6 +20,24 @@ type OpenAITextResponseChoice struct {
 	FinishReason string `json:"finish_reason"`
 }
 
+type OpenAITextStreamResponseChoice struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Role             string `json:"role"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+		Index        int    `json:"index"`
+	} `json:"choices"`
+	Created     int    `json:"created"`
+	Id          string `json:"id"`
+	Model       string `json:"model"`
+	ServiceTier string `json:"service_tier"`
+	Object      string `json:"object"`
+	Usage       `json:"usage"`
+}
+
 type OpenAITextResponse struct {
 	Id      string                     `json:"id"`
 	Model   string                     `json:"model"`

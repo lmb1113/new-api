@@ -65,6 +65,7 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 			return nil, errors.New("field instruction is required")
 		}
 	}
+	textRequest.Stream = true
 	relayInfo.IsStream = textRequest.Stream
 	return textRequest, nil
 }

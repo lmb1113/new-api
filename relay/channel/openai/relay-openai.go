@@ -195,6 +195,119 @@ func OaiStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	return nil, usage
 }
 
+func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.OpenAIErrorWithStatusCode, *dto.Usage) {
+	if resp == nil || resp.Body == nil {
+		common.LogError(c, "invalid response or response body")
+		return service.OpenAIErrorWrapper(fmt.Errorf("invalid response"), "invalid_response", http.StatusInternalServerError), nil
+	}
+	var streamItems []string // store stream items
+
+	var (
+		lastStreamData string
+	)
+	var content, reasoningContent, finishReason, role string
+	var simpleResponse dto.OpenAITextResponse
+	helper.StreamScannerHandler(c, resp, info, func(data string) bool {
+		if lastStreamData != "" {
+			info.SetFirstResponseTime()
+		}
+		// 初始化第一个
+		if simpleResponse.Id == "" {
+			err := common.DecodeJsonStr(data, &simpleResponse)
+			if err != nil {
+				fmt.Println(err.Error())
+			}
+		} else {
+			// 合并流内容
+			var respItem dto.OpenAITextStreamResponseChoice
+			err := common.DecodeJsonStr(data, &respItem)
+			if err != nil {
+				fmt.Println(err.Error())
+			}
+			if respItem.Choices != nil {
+				for _, d := range respItem.Choices {
+					content += d.Delta.Content
+					reasoningContent += d.Delta.ReasoningContent
+					if d.Delta.Role != "" {
+						role = d.Delta.Role
+					}
+					if d.FinishReason != "" {
+						finishReason = d.FinishReason
+					}
+				}
+			}
+		}
+
+		streamItems = append(streamItems, data)
+		lastStreamData = data
+		fmt.Println(data)
+		return true
+	})
+	simpleResponse.Choices[0].SetStringContent(content)
+	simpleResponse.Choices[0].ReasoningContent += reasoningContent
+	simpleResponse.Choices[0].Role = role
+	simpleResponse.Choices[0].FinishReason = finishReason
+	simpleResponse.Object = "chat.completion"
+	var lastStreamResponse dto.ChatCompletionsStreamResponse
+	err := common.DecodeJsonStr(lastStreamData, &lastStreamResponse)
+	if err == nil {
+		if service.ValidUsage(lastStreamResponse.Usage) {
+			simpleResponse.Usage = *lastStreamResponse.Usage
+		}
+	}
+	if err != nil {
+		return service.OpenAIErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
+	}
+	if simpleResponse.Error != nil && simpleResponse.Error.Type != "" {
+		return &dto.OpenAIErrorWithStatusCode{
+			Error:      *simpleResponse.Error,
+			StatusCode: resp.StatusCode,
+		}, nil
+	}
+	responseBody, err := json.Marshal(&simpleResponse)
+	switch info.RelayFormat {
+	case relaycommon.RelayFormatOpenAI:
+		break
+	case relaycommon.RelayFormatClaude:
+		claudeResp := service.ResponseOpenAI2Claude(&simpleResponse, info)
+		claudeRespStr, err := json.Marshal(claudeResp)
+		if err != nil {
+			return service.OpenAIErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
+		}
+		responseBody = claudeRespStr
+	}
+
+	// Reset response body
+	resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+	// We shouldn't set the header before we parse the response body, because the parse part may fail.
+	// And then we will have to send an error response, but in this case, the header has already been set.
+	// So the httpClient will be confused by the response.
+	// For example, Postman will report error, and we cannot check the response at all.
+	for k, v := range resp.Header {
+		c.Writer.Header().Set(k, v[0])
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(c.Writer, resp.Body)
+	if err != nil {
+		//return service.OpenAIErrorWrapper(err, "copy_response_body_failed", http.StatusInternalServerError), nil
+		common.SysError("error copying response body: " + err.Error())
+	}
+	resp.Body.Close()
+	if simpleResponse.Usage.TotalTokens == 0 || (simpleResponse.Usage.PromptTokens == 0 && simpleResponse.Usage.CompletionTokens == 0) {
+		completionTokens := 0
+		for _, choice := range simpleResponse.Choices {
+			ctkm, _ := service.CountTextToken(choice.Message.StringContent()+choice.Message.ReasoningContent+choice.Message.Reasoning, info.UpstreamModelName)
+			completionTokens += ctkm
+		}
+		simpleResponse.Usage = dto.Usage{
+			PromptTokens:     info.PromptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      info.PromptTokens + completionTokens,
+		}
+	}
+	return nil, &simpleResponse.Usage
+}
+
 func OpenaiHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.OpenAIErrorWithStatusCode, *dto.Usage) {
 	var simpleResponse dto.OpenAITextResponse
 	responseBody, err := io.ReadAll(resp.Body)
