@@ -81,6 +81,7 @@ type RelayInfo struct {
 	UserQuota            int
 	RelayFormat          string
 	SendResponseCount    int
+	Stream2Delay         bool // 流转非流
 	ThinkingContentInfo
 	ClaudeConvertInfo
 	*RerankerInfo

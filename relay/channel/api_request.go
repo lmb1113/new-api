@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -35,7 +36,9 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if common2.DebugEnabled {
 		println("fullRequestURL:", fullRequestURL)
 	}
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	reqBodyReader := io.NopCloser(requestBody)
+	data, _ := io.ReadAll(reqBodyReader)
+	req, err := http.NewRequest(c.Request.Method, fullRequestURL, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -47,6 +50,7 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
 	}
+	resp.Request.Body = io.NopCloser(bytes.NewReader(data))
 	return resp, nil
 }
 

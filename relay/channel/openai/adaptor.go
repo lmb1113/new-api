@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -23,8 +24,6 @@ import (
 	"one-api/relay/constant"
 	"one-api/service"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 )
 
 type Adaptor struct {
@@ -265,9 +264,13 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		err, usage = common_handler.RerankHandler(c, info, resp)
 	default:
 		if info.IsStream {
-			err, usage = OaiStreamHandlerV2(c, resp, info)
+			err, usage = OaiStreamHandler(c, resp, info)
 		} else {
-			err, usage = OpenaiHandler(c, resp, info)
+			if info.Stream2Delay {
+				err, usage = OaiStreamHandlerV2(a, c, resp, info, nil, "")
+			} else {
+				err, usage = OpenaiHandler(c, resp, info)
+			}
 		}
 	}
 	return

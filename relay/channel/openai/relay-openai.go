@@ -195,7 +195,7 @@ func OaiStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	return nil, usage
 }
 
-func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.OpenAIErrorWithStatusCode, *dto.Usage) {
+func OaiStreamHandlerV2(a *Adaptor, c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, simpleResponse *dto.OpenAITextResponse, lastContent string) (*dto.OpenAIErrorWithStatusCode, *dto.Usage) {
 	if resp == nil || resp.Body == nil {
 		common.LogError(c, "invalid response or response body")
 		return service.OpenAIErrorWrapper(fmt.Errorf("invalid response"), "invalid_response", http.StatusInternalServerError), nil
@@ -206,7 +206,9 @@ func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.R
 		lastStreamData string
 	)
 	var content, reasoningContent, finishReason, role string
-	var simpleResponse dto.OpenAITextResponse
+	if simpleResponse == nil {
+		simpleResponse = &dto.OpenAITextResponse{}
+	}
 	helper.StreamScannerHandler(c, resp, info, func(data string) bool {
 		if lastStreamData != "" {
 			info.SetFirstResponseTime()
@@ -215,14 +217,14 @@ func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.R
 		if simpleResponse.Id == "" {
 			err := common.DecodeJsonStr(data, &simpleResponse)
 			if err != nil {
-				fmt.Println(err.Error())
+				return false
 			}
 		} else {
 			// 合并流内容
 			var respItem dto.OpenAITextStreamResponseChoice
 			err := common.DecodeJsonStr(data, &respItem)
 			if err != nil {
-				fmt.Println(err.Error())
+				return false
 			}
 			if respItem.Choices != nil {
 				for _, d := range respItem.Choices {
@@ -240,19 +242,33 @@ func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.R
 
 		streamItems = append(streamItems, data)
 		lastStreamData = data
-		fmt.Println(data)
 		return true
 	})
-	simpleResponse.Choices[0].SetStringContent(content)
+	lastContent += content
+	simpleResponse.Choices[0].SetStringContent(lastContent)
 	simpleResponse.Choices[0].ReasoningContent += reasoningContent
-	simpleResponse.Choices[0].Role = role
+	if role != "" {
+		simpleResponse.Choices[0].Role = role
+	} else {
+		simpleResponse.Choices[0].Role = "assistant"
+	}
 	simpleResponse.Choices[0].FinishReason = finishReason
 	simpleResponse.Object = "chat.completion"
 	var lastStreamResponse dto.ChatCompletionsStreamResponse
 	err := common.DecodeJsonStr(lastStreamData, &lastStreamResponse)
 	if err == nil {
 		if service.ValidUsage(lastStreamResponse.Usage) {
-			simpleResponse.Usage = *lastStreamResponse.Usage
+			// 合并计费
+			simpleResponse.Usage.PromptTokens += lastStreamResponse.Usage.PromptTokens
+			simpleResponse.Usage.CompletionTokens += lastStreamResponse.Usage.CompletionTokens
+			simpleResponse.Usage.PromptCacheHitTokens += lastStreamResponse.Usage.PromptCacheHitTokens
+			simpleResponse.Usage.PromptTokensDetails.CachedTokens += lastStreamResponse.Usage.PromptTokensDetails.CachedTokens
+			simpleResponse.Usage.PromptTokensDetails.CachedCreationTokens += lastStreamResponse.Usage.PromptTokensDetails.CachedCreationTokens
+			simpleResponse.Usage.PromptTokensDetails.TextTokens += lastStreamResponse.Usage.PromptTokensDetails.TextTokens
+			simpleResponse.Usage.PromptTokensDetails.AudioTokens += lastStreamResponse.Usage.PromptTokensDetails.AudioTokens
+			simpleResponse.Usage.PromptTokensDetails.ImageTokens += lastStreamResponse.Usage.PromptTokensDetails.ImageTokens
+			simpleResponse.Usage.CompletionTokenDetails.TextTokens += lastStreamResponse.Usage.CompletionTokenDetails.TextTokens
+			simpleResponse.Usage.CompletionTokenDetails.AudioTokens += lastStreamResponse.Usage.CompletionTokenDetails.AudioTokens
 		}
 	}
 	if err != nil {
@@ -264,12 +280,50 @@ func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.R
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
+	if len(simpleResponse.Choices) > 0 && simpleResponse.Choices[0].FinishReason == "max_tokens" {
+		var body = io.NopCloser(resp.Request.Body)
+
+		bodyData, err := io.ReadAll(body)
+		if err != nil {
+			return service.OpenAIErrorWrapper(err, "resty_marshal_request_body_failed", http.StatusInternalServerError), nil
+		}
+		var request *dto.GeneralOpenAIRequest
+		err = json.Unmarshal(bodyData, &request)
+		if err != nil {
+			return service.OpenAIErrorWrapper(err, "resty_unmarshal_request_body_failed", http.StatusInternalServerError), nil
+		}
+		request.Messages = append(request.Messages, simpleResponse.Choices[0].Message)
+		promptMessage := dto.Message{
+			Role: "user",
+		}
+		promptMessage.SetStringContent("Continue outputting unfinished content without returning any other prompts, simply return from the truncated area using the previous language")
+		request.Messages = append(request.Messages, promptMessage)
+		aiRequest, err := a.ConvertOpenAIRequest(c, info, request)
+		jsonData, err := json.Marshal(aiRequest)
+		if err != nil {
+			return service.OpenAIErrorWrapper(err, "convert_request_handle_failed", http.StatusInternalServerError), nil
+		}
+		requestBody := bytes.NewBuffer(jsonData)
+		c.Request.Body = io.NopCloser(requestBody)
+		newResp, err := a.DoRequest(c, info, requestBody)
+		if err != nil {
+			return nil, nil
+		}
+		var httpResp *http.Response
+		if newResp != nil {
+			httpResp = newResp.(*http.Response)
+			if httpResp.StatusCode != http.StatusOK {
+				return service.OpenAIErrorWrapper(fmt.Errorf("invalid response"), "invalid_response", http.StatusInternalServerError), nil
+			}
+		}
+		return OaiStreamHandlerV2(a, c, httpResp, info, simpleResponse, lastContent)
+	}
 	responseBody, err := json.Marshal(&simpleResponse)
 	switch info.RelayFormat {
 	case relaycommon.RelayFormatOpenAI:
 		break
 	case relaycommon.RelayFormatClaude:
-		claudeResp := service.ResponseOpenAI2Claude(&simpleResponse, info)
+		claudeResp := service.ResponseOpenAI2Claude(simpleResponse, info)
 		claudeRespStr, err := json.Marshal(claudeResp)
 		if err != nil {
 			return service.OpenAIErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
@@ -286,6 +340,7 @@ func OaiStreamHandlerV2(c *gin.Context, resp *http.Response, info *relaycommon.R
 	for k, v := range resp.Header {
 		c.Writer.Header().Set(k, v[0])
 	}
+	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, err = io.Copy(c.Writer, resp.Body)
 	if err != nil {

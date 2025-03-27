@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="BUILD" type="GoApplicationRunConfiguration" factoryName="Go Application">
+  <configuration default="false" name="new-api" type="GoApplicationRunConfiguration" factoryName="Go Application">
     <module name="new-api" />
     <working_directory value="$PROJECT_DIR$" />
     <envs>
@@ -11,7 +11,7 @@
     <package value="one-api" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$/main.go" />
-    <output_directory value="$PROJECT_DIR$/bin" />
+    <output_directory value="$PROJECT_DIR$/bin/" />
     <option name="run" value="false" />
     <method v="2" />
   </configuration>
